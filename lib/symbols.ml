@@ -20,20 +20,47 @@ type t = Address.t String.Map.t
 
 let empty = String.Map.empty
 
-let union t t' =
+let strict_union t t' =
   String.Map.union t t' ~f:(fun symbol_name _ _ ->
       failwithf "Symbol %s defined in several sections" symbol_name)
 
+(* Identifies whether a symbol is a generic OCaml function
+   that is generated on the fly for a phrase when required.
+   Those symbols can appear several time in a toplevel session
+   if the right conditions are met. *)
+let is_gen_fun symbol_name =
+  String.starts_with ~prefix:"caml_apply" symbol_name
+  || String.starts_with ~prefix:"caml_curry" symbol_name
+  || String.starts_with ~prefix:"caml_send" symbol_name
+
+
+let aggregate ~current ~new_symbols =
+  (* TODO: we should most likely handle local symbols properly.
+     For the moment we just special-case the local symbol used to
+     identify the caml_call_gc glue code; other local symbols should
+     be properly mangled and unique per compilation unit.  When
+     encountering this symbol we always pick the most recent address for it,
+     which will cause older definitions to be ignored. *)
+  String.Map.union current new_symbols ~f:(fun symbol_name _old new_ ->
+    if is_gen_fun symbol_name
+       || String.equal symbol_name ".Lcaml_call_gc_"
+       || String.starts_with ~prefix:".Lcaml_apply" symbol_name
+       || String.starts_with ~prefix:".Lcaml_curry" symbol_name
+       || String.starts_with ~prefix:".Lcaml_send" symbol_name
+    then Some new_
+    else failwithf "Multiple occurrences of the symbol %s" symbol_name)
+
 let from_binary_section { address; value = binary_section } =
-  let symbol_map = X86_binary_emitter.labels binary_section in
-  X86_binary_emitter.StringMap.fold
+  let symbol_tbl = X86_binary_emitter.labels binary_section in
+  Misc.Stdlib.String.Tbl.fold
     (fun name symbol acc ->
       match (symbol.X86_binary_emitter.sy_pos, name) with
       | None, _ -> failwithf "Symbol %s has no offset" name
       | Some _, ("caml_absf_mask" | "caml_negf_mask") -> acc
       | Some offset, _ ->
           String.Map.add ~key:name ~data:(Address.add_int address offset) acc)
-    symbol_map String.Map.empty
+    symbol_tbl
+    String.Map.empty
 
 let find t name =
   match String.Map.find_opt name t with
